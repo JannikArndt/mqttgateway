@@ -1,8 +1,7 @@
 package main
 
 import (
-	"fmt"
-	"strconv"
+	"encoding/json"
 	"strings"
 	"sync"
 
@@ -60,7 +59,35 @@ func newMQTTExporter() *mqttExporter {
 	c.counterMetrics = make(map[string]*prometheus.CounterVec)
 	c.metricsLabels = make(map[string][]string)
 
-	m.Subscribe(*topic, 2, c.receiveMessage())
+	c.metrics["temperature"] = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "temperature",
+			Help: "Temperature",
+		},
+		[]string{"room"},
+	)
+
+	c.metrics["humidity"] = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "humidity",
+			Help: "Humidity",
+		},
+		[]string{"room"},
+	)
+
+	c.metrics["power"] = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "power",
+			Help: "power",
+		},
+		[]string{"room"},
+	)
+
+	var topics = strings.Split(*topic, " ")
+
+	for _, top := range topics {
+		m.Subscribe(top, 2, c.receiveMessage())
+	}
 
 	return c
 }
@@ -102,85 +129,91 @@ func (c *mqttExporter) Collect(ch chan<- prometheus.Metric) {
 		m.Collect(ch)
 	}
 }
+
+// {"Time":"2019-11-22T17:03:05","SI7021":{"Temperature":20.6,"Humidity":56.7},"TempUnit":"C"}
+type SensorMessage struct {
+	Time     string
+	SI7021   Reading
+	TempUnit string
+}
+
+type Reading struct {
+	Temperature float64
+	Humidity    float64
+}
+
+type ResultMessage struct {
+	POWER string
+}
+
+// {"Time":"2019-11-20T21:35:48","Uptime":"3T13:21:53","Heap":16,"SleepMode":"Dynamic","Sleep":50,"LoadAvg":19,"POWER1":"OFF",
+// "Wifi":{"AP":1,"SSId":"xxx","BSSId":"xx:xx:xx:xx:xx:xx","Channel":11,"RSSI":100,"LinkCount":1,"Downtime":"0T00:00:04"}}
+type StateMessage struct {
+	Time      string
+	Uptime    string
+	Heap      string
+	SleepMode string
+	Sleep     int
+	LoadAvg   int
+	POWER1    string
+}
+
 func (e *mqttExporter) receiveMessage() func(mqtt.Client, mqtt.Message) {
 	return func(c mqtt.Client, m mqtt.Message) {
 		mutex.Lock()
 		defer mutex.Unlock()
-		t := m.Topic()
-		t = strings.TrimPrefix(m.Topic(), *prefix)
-		t = strings.TrimPrefix(t, "/")
-		parts := strings.Split(t, "/")
-		if len(parts)%2 == 0 {
-			log.Warnf("Invalid topic: %s: odd number of levels, ignoring", t)
-			return
-		}
-		metric_name := parts[len(parts)-1]
-		pushed_metric_name := fmt.Sprintf("mqtt_%s_last_pushed_timestamp", metric_name)
-		count_metric_name := fmt.Sprintf("mqtt_%s_push_total", metric_name)
-		metric_labels := parts[:len(parts)-1]
-		var labels []string
-		labelValues := prometheus.Labels{}
-		log.Debugf("Metric name: %v", metric_name)
-		for i, l := range metric_labels {
-			if i%2 == 1 {
-				continue
-			}
-			labels = append(labels, l)
-			labelValues[l] = metric_labels[i+1]
-		}
 
-		invalidate := false
-		if _, ok := e.metricsLabels[metric_name]; ok {
-			l := e.metricsLabels[metric_name]
-			if !compareLabels(l, labels) {
-				log.Warnf("Label names are different: %v and %v, invalidating existing metric", l, labels)
-				prometheus.Unregister(e.metrics[metric_name])
-				invalidate = true
-			}
-		}
-		e.metricsLabels[metric_name] = labels
-		if _, ok := e.metrics[metric_name]; ok && !invalidate {
-			log.Debugf("Metric already exists")
-		} else {
-			log.Debugf("Creating new metric: %s %v", metric_name, labels)
-			e.metrics[metric_name] = prometheus.NewGaugeVec(
-				prometheus.GaugeOpts{
-					Name: metric_name,
-					Help: "Metric pushed via MQTT",
-				},
-				labels,
-			)
-			e.counterMetrics[count_metric_name] = prometheus.NewCounterVec(
-				prometheus.CounterOpts{
-					Name: count_metric_name,
-					Help: fmt.Sprintf("Number of times %s was pushed via MQTT", metric_name),
-				},
-				labels,
-			)
-			e.metrics[pushed_metric_name] = prometheus.NewGaugeVec(
-				prometheus.GaugeOpts{
-					Name: pushed_metric_name,
-					Help: fmt.Sprintf("Last time %s was pushed via MQTT", metric_name),
-				},
-				labels,
-			)
-		}
-		if s, err := strconv.ParseFloat(string(m.Payload()), 64); err == nil {
-			e.metrics[metric_name].With(labelValues).Set(s)
-			e.metrics[pushed_metric_name].With(labelValues).SetToCurrentTime()
-			e.counterMetrics[count_metric_name].With(labelValues).Inc()
+		labelValues := prometheus.Labels{}
+		labelValues["room"] = strings.Split(m.Topic(), "/")[1]
+
+		var messageType = strings.Split(m.Topic(), "/")[2]
+		switch messageType {
+		case "STATE":
+			e.logStateMessage(m, labelValues)
+		case "SENSOR":
+			e.logSensorMessage(m, labelValues)
+		case "RESULT":
+			e.logResultMessage(m, labelValues)
+		case "POWER":
+			e.logPowerMessage(m, labelValues)
+		case "POWER1":
+			e.logPowerMessage(m, labelValues)
+		case "LWT":
+		default:
+			log.Warnf("Invalid topic: %s: Not ending in STATE or SENSOR", m.Topic())
 		}
 	}
 }
 
-func compareLabels(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
+func (e *mqttExporter) logStateMessage(m mqtt.Message, labelValues prometheus.Labels) {
+	var message StateMessage
+	_ = json.Unmarshal(m.Payload(), &message)
+	e.metrics["power"].With(labelValues).Set(onOffToFloat(message.POWER1))
+}
+
+func (e *mqttExporter) logSensorMessage(m mqtt.Message, labelValues prometheus.Labels) {
+	var message SensorMessage
+	_ = json.Unmarshal(m.Payload(), &message)
+
+	e.metrics["temperature"].With(labelValues).Set(message.SI7021.Temperature)
+	e.metrics["humidity"].With(labelValues).Set(message.SI7021.Humidity)
+}
+
+func (e *mqttExporter) logPowerMessage(m mqtt.Message, labelValues prometheus.Labels) {
+	var message = string(m.Payload())
+	e.metrics["power"].With(labelValues).Set(onOffToFloat(message))
+}
+
+func (e *mqttExporter) logResultMessage(m mqtt.Message, labelValues prometheus.Labels) {
+	var message ResultMessage
+	_ = json.Unmarshal(m.Payload(), &message)
+	e.metrics["power"].With(labelValues).Set(onOffToFloat(message.POWER))
+}
+
+func onOffToFloat(onOff string) float64 {
+	var power = 0
+	if onOff == "ON" {
+		power = 1
 	}
-	for i, v := range a {
-		if v != b[i] {
-			return false
-		}
-	}
-	return true
+	return float64(power)
 }
