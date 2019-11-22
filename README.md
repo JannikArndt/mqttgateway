@@ -1,82 +1,48 @@
-# MQTTGateway for Prometheus
+# MQTT to Prometheus (Tasmota Style)
 
 A project that subscribes to MQTT queues and published prometheus metrics.
 
-```
-usage: mqttgateway [<flags>]
+Forked from https://github.com/inuits/mqttgateway
 
-Flags:
-  --help                        Show context-sensitive help (also try --help-long and --help-man).
-  --web.listen-address=":9337"  Address on which to expose metrics and web interface.
-  --web.telemetry-path="/metrics"
-                                Path under which to expose metrics.
-  --mqtt.broker-address="tcp://localhost:1883"
-                                Address of the MQTT broker.
-                                The default is taken from $MQTT_BROKER_ADDRESS if it is set.
-  --mqtt.topic="prometheus/#"   MQTT topic to subscribe to.
-                                The default is taken from $MQTT_TOPIC if it is set.
-  --mqtt.prefix="prometheus"    MQTT topic prefix to remove when creating metrics.
-                                The default is taken from $MQTT_PREFIX if it is set.
-  --mqtt.username=""            MQTT username.
-                                The default is taken from $MQTT_USERNAME if it is set.
-  --mqtt.password=""            MQTT password.
-                                The default is taken from $MQTT_PASSWORD if it is set.
-  --mqtt.clientid=""            MQTT client ID.
-                                The default is taken from $MQTT_CLIENT_ID if it is set.
-  --log.level="info"            Only log messages with the given severity or above. Valid levels: [debug, info, warn, error, fatal]
-  --log.format="logger:stderr"  Set the log target and format. Example: "logger:syslog?appname=bob&local=7" or "logger:stdout?json=true"
-```
+Adapted for devices that run https://github.com/arendst/Tasmota
 
 ## Installation
 
 Requires go > 1.9
 
 ```
-go get -u github.com/inuits/mqttgateway
+go get -u github.com/JannikArndt/mqtttoprom
 ```
+
+Build for Raspberry Pi:
+
+```
+GOOS=linux GOARCH=arm GOARM=5 go build
+```
+
+You probably want the service to run around the clock. `systemd` can help you. 
+You can find a service-definition in [mqtttoprom.service](mqtttoprom.service) and an
+installation script that creates a dedicated user and enables the service in [install_mqtttoprom.sh](install_mqtttoprom.sh).
+Unfortunately, it needs to run as root, so you should take a look into what it does before executing it 😉
 
 ## How does it work?
 
 mqttgateway will connect to the MQTT broker at `--mqtt.broker-address` and
 listen to the topics specified by `--mqtt.topic`.
 
-By default, it will listen to `prometheus/#`.
+By default, it will listen to `#`.
 
-The format for the topics is as follow:
+It expects the topics to follow the Tasmota-scheme 
 
-`prefix/LABEL1/VALUE1/LABEL2/VALUE2/NAME`
+* `tele/<room>/SENSOR` for temperature and humidity data
+* `tele/<room>/STATE` for power ON/OFF
 
-A topic `prometheus/job/ESP8266/instance/livingroom/temperature_celsius` would
-be converted to a metric
-`temperature_celsius{job="ESP8266",instance="livingroom"}`.
-
-If labelnames differ for a same metric, then we invalidate existing metrics and
-only keep new ones. Then we issue a warning in the logs. You should avoid it.
-
-Two other metrics are published, for each metric:
-
-- `mqtt_NAME_last_pushed_timestamp`, the last time NAME metric has been pushed
-(unix time, in seconds)
-- `mqtt_NAME_push_total`, the number of times a metric has been pushed
-
-## Security
-
-This project does not support authentication yet but that is planned.
-
-## Example
+and exports them as
 
 ```
-$ mosquitto_pub -m 20.2 -t prometheus/job/ESP8266/instance/livingroom/temperature_celsius
-$ curl -s http://127.0.0.1:9337/metrics|grep temperature_celsius|grep -v '#'
-mqtt_temperature_celsius_last_pushed_timestamp{instance="livingroom",job="ESP8266"} 1.525185129171293e+09
-mqtt_temperature_celsius_push_total{instance="livingroom",job="ESP8266"} 1
-temperature_celsius{instance="livingroom",job="ESP8266"} 20.2
+power{room="<room>"} 0
+temperature{room="<room>"} 20.5
+humidity{room="<room>"} 63.9
 ```
 
-## A note about the prometheus config
-
-If you use `job` and `instance` labels, please refer to the [pushgateway
-exporter
-documentation](https://github.com/prometheus/pushgateway#about-the-job-and-instance-labels).
-
-TL;DR: you should set `honor_labels: true` in the scrape config.
+on http://localhost:9337/metrics in a format that Prometheus can read. 
