@@ -175,12 +175,13 @@ func (e *mqttExporter) receiveMessage() func(mqtt.Client, mqtt.Message) {
 		case "RESULT":
 			e.logResultMessage(m, labelValues)
 		case "POWER":
-			e.logPowerMessage(m, labelValues)
+			// e.logPowerMessage(m, labelValues)
 		case "POWER1":
 			e.logPowerMessage(m, labelValues)
 		case "LWT":
+		case "UPTIME":
 		default:
-			log.Warnf("Invalid topic: %s: Not ending in STATE or SENSOR", m.Topic())
+			log.Warnf("Invalid topic: %s ends with unknown message type!", m.Topic())
 		}
 	}
 }
