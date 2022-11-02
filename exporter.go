@@ -47,7 +47,7 @@ func newMQTTExporter() *mqttExporter {
 			prometheus.BuildFQName(progname, "build", "info"),
 			"Build info of this instance",
 			nil,
-			prometheus.Labels{"version": version}),
+			prometheus.Labels{"version": "2"}),
 		connectDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(progname, "mqtt", "connected"),
 			"Is the exporter connected to mqtt broker",
@@ -180,6 +180,8 @@ func (e *mqttExporter) receiveMessage() func(mqtt.Client, mqtt.Message) {
 			e.logPowerMessage(m, labelValues)
 		case "LWT":
 		case "UPTIME":
+		case "sensors":
+		case "config":
 		default:
 			log.Warnf("Invalid topic: %s ends with unknown message type!", m.Topic())
 		}
